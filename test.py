@@ -8,8 +8,7 @@ MODEL_PATH = "mediapipe_face-facelandmarkdetector-float.onnx/model.onnx/model.on
 
 # --- Create ONNX session (QNN/NPU first, CPU fallback) ---
 providers = [
-    ("QNNExecutionProvider", {"backend_path": "QnnHtp.dll"}),  # Snapdragon NPU
-    "CPUExecutionProvider"
+    ("QNNExecutionProvider", {"backend_path": "QnnHtp.dll"})  # Snapdragon NPU
 ]
 sess = ort.InferenceSession(MODEL_PATH, providers=providers)
 
@@ -60,31 +59,21 @@ def preprocess_bgr(frame):
     return crop, tensor
 
 # --- Decode model outputs into 2D landmarks ---
-def decode_landmarks(outputs, frame):
-    """
-    This part depends on the exact model head.
-    Many face-landmark models output either:
-      - (1, num_points*2) normalized [0,1] x/y pairs, or
-      - (1, num_points, 2), sometimes with z.
-    We’ll try to infer a reasonable shape.
-    """
-    out = outputs[0]
-    arr = np.array(out)
-
-    # Squeeze batch if present
-    arr = np.squeeze(arr)
-
-    # If flat vector length is even, reshape to (num_points, 2)
-    if arr.ndim == 1 and arr.size % 2 == 0:
-        pts = arr.reshape(-1, 2)
-    elif arr.ndim == 2 and arr.shape[1] >= 2:
-        pts = arr[:, :2]
-    else:
-        # Fallback: nothing we can parse
+def decode_landmarks(outputs):
+    # Use the second output: (1, 468, 3) -> take x,y
+    arr = np.array(outputs[1])        # out1
+    arr = arr.squeeze()               # (468, 3)
+    if arr.ndim != 2 or arr.shape[1] < 2:
         return None
-
-    # Some models output pixel coords, others normalized. We’ll let draw_landmarks scale if normalized.
+    pts = arr[:, :2]                  # (468, 2) normalized [0,1]
+    # Clip for safety
+    pts = np.clip(pts, 0.0, 1.0)
     return pts
+def draw_landmarks_norm01(img, pts, color=(0,255,0)):
+    h, w = img.shape[:2]
+    for (x, y) in pts:
+        px, py = int(x * w), int(y * h)
+        cv2.circle(img, (px, py), 1, color, -1)
 
 # --- Webcam loop ---
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -107,15 +96,24 @@ while True:
     # Inference
     t0 = time.time()
     outputs = sess.run(None, {inp_name: tensor})
+    # adding
+    if fps_avg is None:
+        for i, o in enumerate(outputs):
+            arr = np.array(o)
+            print(f"[DEBUG] out{i} shape:", arr.shape, "dtype:", arr.dtype)
+            if arr.size < 50:
+                print("[DEBUG] sample:", arr.flatten()[:min(arr.size,20)])
+
+    # end adding
     t1 = time.time()
     dt = (t1 - t0)
     fps = 1.0 / dt if dt > 0 else 0.0
     fps_avg = fps if fps_avg is None else (0.9 * fps_avg + 0.1 * fps)
 
     # Decode & draw
-    pts = decode_landmarks(outputs, vis_crop)
+    pts = decode_landmarks(outputs)
     if pts is not None:
-        draw_landmarks(vis_crop, pts, color=(0, 255, 0))
+        draw_landmarks_norm01(vis_crop, pts, color=(0, 255, 0))
     else:
         cv2.putText(vis_crop, "No landmarks decoded", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
